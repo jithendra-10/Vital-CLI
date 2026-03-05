@@ -1,0 +1,297 @@
+import os
+from pathlib import Path
+from rich.console import Console
+
+console = Console()
+
+# File types to read
+CODE_EXTENSIONS = {
+    ".py", ".js", ".ts", ".jsx", ".tsx", ".java", ".c", ".cpp",
+    ".go", ".rs", ".rb", ".php", ".swift", ".kt", ".cs", ".html",
+    ".css", ".json", ".yaml", ".yml", ".toml", ".sh", ".md"
+}
+
+# Folders to always skip
+IGNORE_DIRS = {
+    "node_modules", ".git", "__pycache__", ".venv", "venv",
+    "env", "dist", "build", ".next", ".nuxt", "target"
+}
+
+MAX_FILE_SIZE = 50_000   # 50KB per file
+MAX_TOTAL_SIZE = 200_000  # 200KB total context
+
+
+def read_file(path: str) -> str | None:
+    """Read a single file safely."""
+    try:
+        p = Path(path)
+        if p.stat().st_size > MAX_FILE_SIZE:
+            return f"[File too large to read: {path}]"
+        return p.read_text(encoding="utf-8", errors="ignore")
+    except Exception as e:
+        return None
+
+
+def scan_project(root: str = ".") -> dict:
+    """
+    Scan project directory and return dict of {filepath: content}.
+    Respects size limits and ignores irrelevant folders.
+    """
+    root = Path(root).resolve()
+    files = {}
+    total_size = 0
+
+    for dirpath, dirnames, filenames in os.walk(root):
+        # Remove ignored dirs in-place so os.walk skips them
+        dirnames[:] = [d for d in dirnames if d not in IGNORE_DIRS]
+
+        for filename in filenames:
+            filepath = Path(dirpath) / filename
+
+            if filepath.suffix not in CODE_EXTENSIONS:
+                continue
+
+            content = read_file(str(filepath))
+            if content is None:
+                continue
+
+            size = len(content)
+            if total_size + size > MAX_TOTAL_SIZE:
+                console.print("[yellow]Note: Project too large, reading partial context[/yellow]")
+                break
+
+            rel_path = str(filepath.relative_to(root))
+            files[rel_path] = content
+            total_size += size
+
+    return files
+
+
+def build_context(root: str = ".") -> str:
+    """
+    Build a formatted context string from project files.
+    This is what gets sent to the AI.
+    """
+    files = scan_project(root)
+
+    if not files:
+        return "No code files found in current directory."
+
+    context_parts = [f"Project has {len(files)} file(s):\n"]
+
+    for filepath, content in files.items():
+        context_parts.append(f"\n--- FILE: {filepath} ---\n{content}")
+
+    return "\n".join(context_parts)
+
+
+def get_file_context(filepath: str) -> str:
+    """Get context for a single file."""
+    content = read_file(filepath)
+    if not content:
+        return f"Could not read file: {filepath}"
+    return f"--- FILE: {filepath} ---\n{content}"
+
+
+def detect_language(root: str = ".") -> str:
+    """Detect the main programming language of the project."""
+    files = scan_project(root)
+    ext_count = {}
+
+    for filepath in files:
+        ext = Path(filepath).suffix
+        ext_count[ext] = ext_count.get(ext, 0) + 1
+
+    if not ext_count:
+        return "unknown"
+
+    main_ext = max(ext_count, key=ext_count.get)
+    lang_map = {
+        ".py": "Python", ".js": "JavaScript", ".ts": "TypeScript",
+        ".java": "Java", ".go": "Go", ".rs": "Rust", ".rb": "Ruby",
+        ".php": "PHP", ".cpp": "C++", ".c": "C", ".cs": "C#"
+    }
+    return lang_map.get(main_ext, main_ext)
+import os
+from pathlib import Path
+from rich.console import Console
+
+console = Console()
+
+# ALL supported file types — not just Python
+CODE_EXTENSIONS = {
+    # Python
+    ".py",
+    # Java
+    ".java",
+    # JavaScript / TypeScript
+    ".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs",
+    # Web
+    ".html", ".htm", ".css", ".scss", ".sass",
+    # Systems
+    ".c", ".cpp", ".h", ".hpp", ".cs", ".go", ".rs", ".swift", ".kt",
+    # Scripting
+    ".rb", ".php", ".sh", ".bash", ".zsh", ".ps1",
+    # Data / Config
+    ".json", ".yaml", ".yml", ".toml", ".xml", ".env", ".ini", ".cfg",
+    # Docs
+    ".md", ".txt", ".rst",
+    # SQL
+    ".sql",
+}
+
+# Folders to always skip
+IGNORE_DIRS = {
+    "node_modules", ".git", "__pycache__", ".venv", "venv",
+    "env", "dist", "build", ".next", ".nuxt", "target",
+    "bin", "obj", ".idea", ".vscode", "out", ".gradle"
+}
+
+MAX_FILE_SIZE  = 80_000   # 80KB per file
+MAX_TOTAL_SIZE = 300_000  # 300KB total context
+
+
+def read_file(path: str) -> str | None:
+    """Read a single file safely."""
+    try:
+        p = Path(path)
+        if p.stat().st_size > MAX_FILE_SIZE:
+            return f"[File too large to read: {path}]"
+        return p.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return None
+
+
+def scan_project(root: str = ".") -> dict:
+    """
+    Scan project directory and return dict of {filepath: content}.
+    Reads ALL supported file types accurately.
+    """
+    root = Path(root).resolve()
+    files = {}
+    total_size = 0
+
+    for dirpath, dirnames, filenames in os.walk(root):
+        # Skip ignored directories
+        dirnames[:] = [d for d in dirnames if d not in IGNORE_DIRS]
+
+        for filename in filenames:
+            filepath = Path(dirpath) / filename
+
+            if filepath.suffix.lower() not in CODE_EXTENSIONS:
+                continue
+
+            content = read_file(str(filepath))
+            if content is None:
+                continue
+
+            size = len(content)
+            if total_size + size > MAX_TOTAL_SIZE:
+                console.print(
+                    f"[yellow]Note: Large project — loaded {len(files)} files "
+                    f"({total_size//1000}KB). Some files skipped.[/yellow]"
+                )
+                break
+
+            rel_path = str(filepath.relative_to(root))
+            files[rel_path] = content
+            total_size += size
+
+    return files
+
+
+def count_all_files(root: str = ".") -> dict:
+    """
+    Count ALL files in directory including non-code files.
+    Returns detailed breakdown by extension.
+    """
+    root = Path(root).resolve()
+    ext_count = {}
+    total = 0
+
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in IGNORE_DIRS]
+        for filename in filenames:
+            ext = Path(filename).suffix.lower() or "no extension"
+            ext_count[ext] = ext_count.get(ext, 0) + 1
+            total += 1
+
+    return {"total": total, "by_type": ext_count}
+
+
+def build_context(root: str = ".") -> str:
+    """
+    Build a formatted context string from ALL project files.
+    This is what gets sent to the AI.
+    """
+    files = scan_project(root)
+    stats = count_all_files(root)
+
+    if not files:
+        return f"Empty directory or no supported files found in {root}"
+
+    # Build accurate summary
+    ext_summary = ", ".join(
+        f"{count} {ext}" for ext, count in
+        sorted(stats["by_type"].items(), key=lambda x: -x[1])[:8]
+    )
+
+    context_parts = [
+        f"Project directory: {Path(root).resolve()}",
+        f"Total files in folder: {stats['total']}",
+        f"File breakdown: {ext_summary}",
+        f"Files loaded for analysis: {len(files)}\n",
+    ]
+
+    for filepath, content in files.items():
+        context_parts.append(f"\n--- FILE: {filepath} ---\n{content}")
+
+    return "\n".join(context_parts)
+
+
+def get_file_context(filepath: str) -> str:
+    """Get context for a single specific file — reads actual content."""
+    # Try exact path first
+    p = Path(filepath)
+
+    # If not found, search in current directory
+    if not p.exists():
+        matches = list(Path(".").rglob(filepath))
+        if matches:
+            p = matches[0]
+            console.print(f"  [dim]Found file at: {p}[/dim]")
+        else:
+            return f"File not found: {filepath}\nSearched in: {Path('.').resolve()}"
+
+    content = read_file(str(p))
+    if not content:
+        return f"Could not read file: {filepath}"
+
+    return f"--- FILE: {p} ---\n{content}"
+
+
+def detect_language(root: str = ".") -> str:
+    """Detect the main programming language of the project."""
+    stats = count_all_files(root)
+    ext_count = stats["by_type"]
+
+    if not ext_count:
+        return "unknown"
+
+    # Only consider actual code extensions
+    code_only = {
+        k: v for k, v in ext_count.items()
+        if k in CODE_EXTENSIONS
+    }
+
+    if not code_only:
+        return "unknown"
+
+    main_ext = max(code_only, key=code_only.get)
+    lang_map = {
+        ".py": "Python", ".js": "JavaScript", ".ts": "TypeScript",
+        ".java": "Java", ".go": "Go", ".rs": "Rust", ".rb": "Ruby",
+        ".php": "PHP", ".cpp": "C++", ".c": "C", ".cs": "C#",
+        ".kt": "Kotlin", ".swift": "Swift", ".sh": "Shell"
+    }
+    return lang_map.get(main_ext, main_ext)
