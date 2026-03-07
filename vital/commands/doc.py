@@ -1,36 +1,37 @@
-import typer
+"""doc.py — Vital Documentation Generator"""
+
+import os
 from rich.console import Console
-from rich.panel import Panel
-from vital import ai_engine, context, executor
+from vital import ai_engine, context
+from vital.executor import write_file
 from vital.safety import show_plan
 
 console = Console()
 
 
-def run(
-    path: str = typer.Argument(".", help="File or folder to document"),
-    output: str = typer.Option(None, "--output", "-o", help="Output file (default: README.md)"),
-):
+def run(path: str = ".", output: str = None):
     """Auto-generate documentation for your code."""
 
-    console.print(Panel("[bold cyan]Vital Documentation Generator[/bold cyan]", border_style="cyan"))
+    console.print()
+    console.print("  [bold #00ffcc]◈ Vital Doc Generator[/]")
+    console.print("  [#333355]" + "─" * 45 + "[/]\n")
 
-    import os
     if os.path.isfile(path):
-        ctx = context.get_file_context(path)
-        target = f"file '{path}'"
-        default_output = path.replace(".py", "_docs.md")
+        ctx            = context.get_file_context(path)
+        target         = f"file '{os.path.basename(path)}'"
+        default_output = path.replace(".py", "_docs.md").replace(".js", "_docs.md")
     else:
-        console.print(f"\n[dim]Scanning {path}...[/dim]")
-        ctx = context.build_context(path)
-        lang = context.detect_language(path)
-        target = f"project (language: {lang})"
+        console.print(f"  [#888888]Scanning {path}...[/]\n")
+        ctx            = context.build_context(path)
+        lang           = context.detect_language(path)
+        target         = f"project (language: {lang})"
         default_output = "README.md"
 
     output_file = output or default_output
 
-    prompt = f"""
-Generate comprehensive documentation for this {target}. Include:
+    prompt = f"""Generate comprehensive, well-structured documentation for this {target}.
+
+Use this format:
 
 # Project/File Name
 
@@ -38,31 +39,41 @@ Generate comprehensive documentation for this {target}. Include:
 What this does in plain English.
 
 ## Installation
-How to install and set up.
+How to install and set up (if applicable).
 
 ## Usage
-How to use it with examples.
+How to use it with clear examples.
 
-## Functions/Classes Reference
-Each function/class with parameters and return values.
+## API Reference / Functions
+Each function/class with:
+- Purpose
+- Parameters and types
+- Return value
+- Example usage
 
 ## Examples
-Real usage examples with code.
+Real, runnable usage examples.
 
 Code to document:
-{ctx}
+{ctx[:5000]}
 """
 
-    console.print(f"\n[bold yellow]Generating docs for {target}...[/bold yellow]\n")
-    docs = ai_engine.ask(prompt, stream=True)
+    console.print(f"  [#888888]Generating docs for {target}...[/]\n")
 
-    plan = [
+    try:
+        docs = ai_engine.ask(prompt, stream=True)
+    except Exception as e:
+        console.print(f"  [#ff6b6b]✗ Error: {e}[/]\n")
+        return
+
+    if show_plan([
         f"Generate documentation for {target}",
         f"Write to {output_file}",
-    ]
-
-    if show_plan(plan, "Documentation Plan"):
-        executor.write_file(output_file, docs)
-        console.print(f"\n[green]✓ Documentation saved to {output_file}[/green]")
+    ], title="Save Documentation"):
+        write_file(output_file, docs)
+        console.print(
+            f"\n  [bold #00ffcc]✓ Documentation saved to[/] "
+            f"[#ffdd57]{output_file}[/]\n"
+        )
     else:
-        console.print("[yellow]Documentation not saved.[/yellow]")
+        console.print("  [#888888]Documentation not saved.[/]\n")

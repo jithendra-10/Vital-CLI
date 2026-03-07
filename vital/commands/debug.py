@@ -1,84 +1,103 @@
+"""debug.py — Vital Debugger"""
+
 import typer
 from rich.console import Console
-from rich.panel import Panel
-from vital import ai_engine, context, executor
+from vital import ai_engine, context
+from vital.executor import capture_error, write_file, read_file
 from vital.safety import show_plan
 
 console = Console()
 
 
-def run(
-    file: str = typer.Option(None, "--file", "-f", help="File to debug"),
-    command: str = typer.Option(None, "--run", "-r", help="Command to run and capture errors"),
-    error: str = typer.Option(None, "--error", "-e", help="Paste error message directly"),
-):
-    """Debug your code using AI. Analyzes errors and suggests fixes."""
+def run(file: str = None, command: str = None, error: str = None):
+    """Debug your code — analyzes errors and suggests fixes."""
 
-    console.print(Panel("[bold cyan]Vital Debugger[/bold cyan]", border_style="cyan"))
+    console.print()
+    console.print("  [bold #00ffcc]◈ Vital Debugger[/]")
+    console.print("  [#333355]" + "─" * 45 + "[/]\n")
 
     error_output = ""
-    file_context = ""
 
     # Get error from running a command
     if command:
-        console.print(f"\n[dim]Running:[/dim] {command}")
-        error_output = executor.capture_error(command)
-        console.print(f"[red]{error_output}[/red]")
+        console.print(f"  [#888888]Running:[/] [#444466]{command}[/]\n")
+        error_output = capture_error(command)
+        console.print(f"  [#ff6b6b]{error_output}[/]\n")
 
     # Get error from direct paste
     elif error:
         error_output = error
 
-    # No error provided
+    # Ask for error
     else:
-        error_output = typer.prompt("\nPaste your error message")
+        try:
+            error_output = console.input(
+                "  [#ffdd57]Paste your error message:[/] "
+            ).strip()
+        except (KeyboardInterrupt, EOFError):
+            return
+
+    if not error_output:
+        console.print("  [#888888]No error provided.[/]\n")
+        return
 
     # Get file context
     if file:
         file_context = context.get_file_context(file)
     else:
-        console.print("\n[dim]Scanning project for context...[/dim]")
+        console.print("  [#888888]Scanning project...[/]\n")
         file_context = context.build_context(".")
 
-    # Build AI prompt
-    prompt = f"""
-You are an expert debugger. Analyze this error and provide:
+    prompt = f"""You are an expert debugger. Analyze this error and provide:
 1. What caused the error (in simple terms)
-2. Exact fix with code
-3. How to prevent it in future
+2. The exact fix with code
+3. How to prevent it in the future
 
 Error:
 {error_output}
 
 Code Context:
-{file_context}
+{file_context[:4000]}
 """
 
-    console.print("\n[bold yellow]Analyzing error...[/bold yellow]\n")
-    response = ai_engine.ask(prompt, system="You are an expert software debugger. Be concise and practical.")
+    console.print("  [#888888]Analyzing error...[/]\n")
 
-    # If a file was provided, offer to apply the fix
+    try:
+        response = ai_engine.ask(prompt)
+    except Exception as e:
+        console.print(f"  [#ff6b6b]✗ AI error: {e}[/]\n")
+        return
+
+    # Offer to apply fix if a file was provided
     if file:
         console.print()
-        apply = typer.confirm("\nWould you like me to apply the fix to your file?")
+        try:
+            apply = typer.confirm("  Apply the fix to your file?", default=False)
+        except Exception:
+            return
+
         if apply:
-            fix_prompt = f"""
-Based on this error and your analysis, provide ONLY the complete fixed version of the file.
-No explanation, just the fixed code.
+            fix_prompt = f"""Based on this error, provide ONLY the complete fixed file content.
+No explanation, no markdown fences — just the raw fixed code.
 
 Error: {error_output}
-Original file: {file_context}
+Original file:
+{file_context}
 """
+            console.print("\n  [#888888]Generating fix...[/]\n")
             fixed_code = ai_engine.ask(fix_prompt, stream=False)
 
-            plan = [
-                f"Read current {file}",
-                "Apply AI-generated fix",
+            if show_plan([
+                f"Backup {file} → {file}.bak",
                 f"Write fixed version to {file}",
-            ]
-
-            if show_plan(plan, title="Fix Plan"):
-                executor.write_file(file, fixed_code)
-                console.print("\n[green]✓ Fix applied! Run your code to verify.[/green]")
+            ], title="Apply Fix"):
+                original = read_file(file)
+                if original:
+                    write_file(f"{file}.bak", original)
+                write_file(file, fixed_code)
+                console.print(
+                    "\n  [bold #00ffcc]✓ Fix applied![/] "
+                    "[#888888]Run your code to verify.[/]\n"
+                )
             else:
-                console.print("[yellow]Fix not applied.[/yellow]")
+                console.print("  [#888888]Fix not applied.[/]\n")

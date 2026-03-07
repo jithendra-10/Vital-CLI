@@ -2,6 +2,8 @@ import os
 import re
 import sys
 import json
+import time
+import threading
 import subprocess
 from pathlib import Path
 from datetime import datetime
@@ -19,8 +21,70 @@ from rich import box
 
 from vital.config import get_api_key
 from vital import ai_engine, context
+from vital.session import Session, resume_session, show_sessions, cleanup_old_sessions
+from vital.memory import load_memory, memory_show, memory_add, memory_edit, memory_refresh, memory_clear, init_project_memory
+from vital.agent import VitalAgent, is_agent_request
 
 console = Console()
+
+# ── Thinking Spinner ──────────────────────────────────────────────────────────
+
+class ThinkingSpinner:
+    """
+    Animated spinner that shows while AI is thinking.
+    Runs in a background thread — stops the moment streaming starts.
+    """
+
+    FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+    MESSAGES = [
+        "thinking",
+        "analyzing",
+        "processing",
+        "generating",
+        "reasoning",
+    ]
+
+    def __init__(self):
+        self._stop   = threading.Event()
+        self._thread = None
+
+    def start(self, provider: str = None):
+        """Start the spinner in background."""
+        self._stop.clear()
+        self._thread = threading.Thread(
+            target=self._spin,
+            args=(provider,),
+            daemon=True
+        )
+        self._thread.start()
+
+    def stop(self):
+        """Stop the spinner and clear the line."""
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=1)
+        # Clear the spinner line
+        print("\r" + " " * 60 + "\r", end="", flush=True)
+
+    def _spin(self, provider: str = None):
+        provider_label = f" [{provider}]" if provider else ""
+        msg_index = 0
+        frame_index = 0
+
+        while not self._stop.is_set():
+            frame   = self.FRAMES[frame_index % len(self.FRAMES)]
+            message = self.MESSAGES[msg_index % len(self.MESSAGES)]
+            line    = f"\r  \033[36m{frame}\033[0m  \033[90m{message}{provider_label}...\033[0m"
+            print(line, end="", flush=True)
+            time.sleep(0.08)
+            frame_index += 1
+            # Change message every 15 frames (~1.2 seconds)
+            if frame_index % 15 == 0:
+                msg_index += 1
+
+
+# Global spinner instance
+spinner = ThinkingSpinner()
 
 # ── Style ─────────────────────────────────────────────────────────────────────
 STYLE = Style.from_dict({
@@ -51,6 +115,11 @@ COMMANDS = {
     "/clear":    "Clear the screen",
     "/context":  "Show current project context",
     "/model":    "Show current AI model",
+    "/agent":    "Launch Agent Mode — build full projects autonomously",
+    "/providers":"Manage AI providers — add, remove, switch",
+    "/memory":   "Manage memory: show, add, edit, clear, refresh",
+    "/history":  "Show current session history",
+    "/resume":   "Resume a previous session",
     "/allowoff": "Turn off Always Allow mode",
     "/help":     "Show all commands",
     "/exit":     "Exit Vital",
@@ -217,7 +286,6 @@ def guess_filename(language: str, index: int = 0) -> str:
         "sh":         ".sh",
         "bash":       ".sh",
     }
-    # Smart default names
     name_map = {
         "html": "index.html",
         "css":  "style.css",
@@ -229,6 +297,49 @@ def guess_filename(language: str, index: int = 0) -> str:
 
     ext = ext_map.get(language.lower(), ".txt")
     return f"file{index+1}{ext}"
+
+
+def detect_folder_name(user_input: str) -> str | None:
+    """
+    Fix 4 — Smart folder detection from user request.
+    Examples:
+      'create a calculator app'       → 'calculator'
+      'build a todo app named mytodo' → 'mytodo'
+      'make a flask login project'    → 'flask-login'
+      'create a weather app'          → 'weather'
+    """
+    lower = user_input.lower().strip()
+    words = lower.split()
+
+    # Explicit name keywords — highest priority
+    # e.g. "named X", "called X", "name X", "folder X"
+    for i, w in enumerate(words):
+        if w in ("named", "called", "name", "folder", "as") and i + 1 < len(words):
+            candidate = words[i + 1].strip(".,!?'\"/\\")
+            if candidate and len(candidate) > 1:
+                return candidate.replace(" ", "-")
+
+    # App/project keyword patterns — extract subject
+    # e.g. "create a calculator app" → "calculator"
+    #      "build a todo list app"   → "todo-list"
+    app_patterns = [
+        r'(?:create|build|make|generate|write)\s+(?:a|an|the)?\s*([\w\s]+?)\s+(?:app|application|project|website|tool|program|game|system)',
+        r'(?:create|build|make|generate|write)\s+(?:a|an|the)?\s*([\w\s]+?)\s+(?:with|using|in)\s+\w+',
+        r'(?:a|an)\s+([\w\s]+?)\s+(?:app|application|project|website|tool|program)',
+    ]
+
+    import re as _re
+    for pattern in app_patterns:
+        match = _re.search(pattern, lower)
+        if match:
+            name = match.group(1).strip()
+            # Clean up and slugify
+            name = _re.sub(r'[^\w\s-]', '', name)
+            name = name.strip().replace(' ', '-')
+            if name and len(name) > 1 and name not in ('simple', 'basic', 'new', 'my'):
+                return name
+
+    return None
 
 
 # ── Single file accept/reject ─────────────────────────────────────────────────
@@ -431,9 +542,40 @@ def _write_file(filename: str, code: str):
 
 
 def _write_file_path(filepath: Path, code: str):
-    """Write a file to an explicit path."""
+    """Write a file to an explicit path — warns if file already exists."""
     try:
         filepath.parent.mkdir(parents=True, exist_ok=True)
+
+        # ── Fix 5: Overwrite warning ──────────────────────────────────
+        if filepath.exists():
+            existing_size = filepath.stat().st_size
+            console.print(
+                f"\n  [bold #ffdd57]⚠ File already exists:[/] "
+                f"[#aaaaaa]{filepath}[/] "
+                f"[#444444]({existing_size} bytes)[/]"
+            )
+            console.print(
+                "  [bold #00ffcc][O][/] Overwrite  "
+                "[bold #ff6b6b][S][/] Skip  "
+                "[bold #ffdd57][B][/] Backup and overwrite"
+            )
+            try:
+                choice = console.input("  Your choice (O/S/B): ").strip().upper()
+            except (KeyboardInterrupt, EOFError):
+                choice = "S"
+
+            if choice == "S":
+                console.print(f"  [#888888]Skipped {filepath.name}[/]")
+                return
+
+            if choice == "B":
+                # Create .bak backup before overwriting
+                backup = filepath.with_suffix(filepath.suffix + ".bak")
+                filepath.rename(backup)
+                console.print(
+                    f"  [#888888]Backup saved:[/] [#444466]{backup.name}[/]"
+                )
+
         filepath.write_text(code.strip(), encoding="utf-8")
         size = filepath.stat().st_size
         console.print(
@@ -492,6 +634,19 @@ def print_banner():
     console.print(
         f"  [#888888]Directory[/]  [#444466]{WORKING_DIR}[/]"
     )
+
+    # Show memory status
+    from vital.memory import discover_memory_files
+    mem_files = discover_memory_files(str(WORKING_DIR))
+    if mem_files:
+        console.print(
+            f"  [#888888]Memory[/]     [#00ff88]{len(mem_files)} VITAL.md file(s) loaded[/]"
+        )
+    else:
+        console.print(
+            "  [#888888]Memory[/]     [#444444]No VITAL.md found · "
+            "run /memory add to create one[/]"
+        )
     console.print()
     console.print(
         "  [#444444]Type a message · /help for commands · /exit to quit[/]"
@@ -511,15 +666,25 @@ def print_help():
     console.print()
     console.print("  [#444444]Chat examples:[/]")
     console.print("  [#444444]  create a todo app with html css and js[/]")
-    console.print("  [#444444]  build a flask login page[/]")
+    console.print("  [#444444]  build a flask login project named myapp[/]")
     console.print("  [#444444]  optimize my StudentDataCSV.java[/]")
     console.print("  [#444444]  explain this project[/]")
+    console.print()
+    console.print("  [#444444]Memory examples:[/]")
+    console.print("  [#444444]  /memory init             create VITAL.md for this project[/]")
+    console.print("  [#444444]  /memory add 'use TypeScript always'[/]")
+    console.print("  [#444444]  /memory show             see what Vital remembers[/]")
+    console.print()
+    console.print("  [#444444]Session examples:[/]")
+    console.print("  [#444444]  /history                 see this session's messages[/]")
+    console.print("  [#444444]  /resume                  load a previous session[/]")
     console.print()
 
 
 # ── Slash commands ────────────────────────────────────────────────────────────
 
 def handle_slash_command(user_input: str):
+    global current_session
     parts = user_input.strip().split()
     cmd   = parts[0].lower()
     args  = parts[1:] if len(parts) > 1 else []
@@ -537,11 +702,32 @@ def handle_slash_command(user_input: str):
     elif cmd == "/help":
         print_help()
 
+    elif cmd == "/agent":
+        request = " ".join(args) if args else None
+        if not request:
+            try:
+                request = console.input(
+                    "\n  [#ffdd57]What do you want me to build?[/] "
+                ).strip()
+            except (KeyboardInterrupt, EOFError):
+                return
+        if request:
+            agent = VitalAgent(
+                working_dir = WORKING_DIR,
+                ai_ask_fn   = ai_engine.ask
+            )
+            agent.run(request)
+
     elif cmd == "/model":
         console.print(
             f"\n  [#888888]Model:[/] [bold #00ffcc]llama-3.3-70b-versatile[/] "
             f"[#888888]via Groq[/]\n"
         )
+
+    elif cmd == "/providers":
+        from vital.providers import _show_provider_status, edit_providers
+        _show_provider_status()
+        edit_providers()
 
     elif cmd == "/allowoff":
         global ALWAYS_ALLOW
@@ -550,6 +736,62 @@ def handle_slash_command(user_input: str):
             "\n  [bold #ff6b6b]✓ Always Allow OFF[/] — "
             "[#888888]Vital will ask before saving files again[/]\n"
         )
+
+    elif cmd == "/history":
+        if "current_session" in globals():
+            current_session.show_history()
+        else:
+            console.print("\n  [#888888]No session active.[/]\n")
+
+    elif cmd == "/resume":
+        new_session = resume_session()
+        if new_session:
+            current_session = new_session
+
+    elif cmd == "/memory":
+        sub  = args[0].lower() if args else "show"
+        rest = " ".join(args[1:]) if len(args) > 1 else ""
+
+        if sub == "show":
+            memory_show(str(WORKING_DIR))
+
+        elif sub == "add":
+            is_global = "--global" in args
+            fact_args = [a for a in args[1:] if a != "--global"]
+            fact      = " ".join(fact_args)
+            if not fact:
+                fact = console.input(
+                    "  [#ffdd57]Enter fact/rule to remember:[/] "
+                ).strip()
+            if fact:
+                memory_add(fact, global_mem=is_global, start_dir=str(WORKING_DIR))
+
+        elif sub == "edit":
+            is_global = "--global" in args
+            memory_edit(global_mem=is_global, start_dir=str(WORKING_DIR))
+
+        elif sub == "clear":
+            is_global = "--global" in args
+            memory_clear(global_mem=is_global, start_dir=str(WORKING_DIR))
+
+        elif sub == "refresh":
+            memory_refresh(str(WORKING_DIR))
+
+        elif sub == "init":
+            init_project_memory(str(WORKING_DIR))
+
+        else:
+            console.print(
+                "\n  [bold #00ffcc]Memory commands:[/]\n"
+                "  [#ffdd57]/memory show[/]              Show all loaded memory\n"
+                "  [#ffdd57]/memory add <fact>[/]        Add to project memory\n"
+                "  [#ffdd57]/memory add --global <fact>[/] Add to global memory\n"
+                "  [#ffdd57]/memory edit[/]              Edit project VITAL.md\n"
+                "  [#ffdd57]/memory edit --global[/]     Edit global VITAL.md\n"
+                "  [#ffdd57]/memory refresh[/]           Reload memory files\n"
+                "  [#ffdd57]/memory clear[/]             Clear project memory\n"
+                "  [#ffdd57]/memory init[/]              Create VITAL.md for this project\n"
+            )
 
     elif cmd == "/context":
         console.print("\n  [#888888]Scanning...[/]\n")
@@ -655,12 +897,42 @@ def get_toolbar():
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
-def run_interactive():
+def run_interactive(resume: bool = False):
+    global current_session
     if not get_api_key():
         console.print(
             "\n  [#ff6b6b]✗[/]  No API key. Run [bold]vital setup[/bold] first.\n"
         )
         sys.exit(1)
+
+    # ── Cleanup old sessions on startup ──────────────────────────────
+    cleanup_old_sessions()
+
+    # ── Session setup ─────────────────────────────────────────────────
+    if resume:
+        current_session = resume_session()
+        if not current_session:
+            current_session = Session(working_dir=str(WORKING_DIR))
+    else:
+        current_session = Session(working_dir=str(WORKING_DIR))
+
+    # ── Fix 7: Lazy memory load — fast startup, load only when needed ─
+    # Memory is loaded once here and reused — not re-scanned every message
+    project_memory = load_memory(str(WORKING_DIR))
+
+    # Project context is NOT scanned at startup — only when first needed
+    _project_context_cache = {"value": None, "loaded": False}
+
+    def get_project_context() -> str:
+        """Lazy load project context — scanned only on first coding request."""
+        if not _project_context_cache["loaded"]:
+            try:
+                _project_context_cache["value"]  = context.build_context(str(WORKING_DIR))
+                _project_context_cache["loaded"] = True
+            except Exception:
+                _project_context_cache["value"]  = f"Directory: {WORKING_DIR}"
+                _project_context_cache["loaded"] = True
+        return _project_context_cache["value"] or ""
 
     os.system("cls" if os.name == "nt" else "clear")
     print_banner()
@@ -688,83 +960,108 @@ def run_interactive():
             console.print()
             console.print("  [bold #00ffcc]◈ Vital[/]\n")
 
+            # Save user message to session
+            current_session.add("user", user_input)
+
+            # ── Agent Mode — full autonomous project building ─────────────
+            if is_agent_request(user_input):
+                agent = VitalAgent(
+                    working_dir = WORKING_DIR,
+                    ai_ask_fn   = ai_engine.ask
+                )
+                agent.run(user_input)
+                current_session.add("assistant", f"[Agent built: {user_input}]")
+                console.print()
+                console.print("  " + "·" * 55, style="#222244")
+                console.print()
+                continue
+
             mentioned_file  = detect_mentioned_file(user_input)
             multi_file_mode = is_multi_file_request(user_input)
             casual          = is_casual_message(user_input)
 
-            # Build project context — skip for casual chat
+            # Build project context — lazy loaded, skip for casual chat
             try:
                 if casual:
-                    # No project context — just chat naturally
                     proj_ctx = None
                 elif mentioned_file:
                     console.print(f"  [dim]Reading {mentioned_file}...[/dim]\n")
                     file_ctx = context.get_file_context(mentioned_file)
                     proj_ctx = f"Working directory: {WORKING_DIR}\n\n{file_ctx}"
                 else:
-                    proj_ctx = context.build_context(str(WORKING_DIR))
+                    proj_ctx = get_project_context()
             except Exception:
                 proj_ctx = None
 
+            # Build conversation history (sliding window)
+            history_window = current_session.get_window()
+            if history_window and history_window[-1]["role"] == "user":
+                history_window = history_window[:-1]
+            history_text = ""
+            if history_window:
+                lines = []
+                for m in history_window[-8:]:
+                    role = "User" if m["role"] == "user" else "Vital"
+                    lines.append(f"{role}: {m['content'][:300]}")
+                history_text = "\n".join(lines)
+
+            # Memory block — injected into every prompt
+            mem_block = (
+                f"Project Memory (follow these rules strictly):\n{project_memory}\n"
+                if project_memory else ""
+            )
+            # History block
+            hist_block = (
+                f"Recent conversation:\n{history_text}\n"
+                if history_text else ""
+            )
+
             # Build prompt
             if casual:
-                # Simple friendly prompt — no project context
-                prompt = f"""You are Vital, an AI assistant focused on coding, programming, education, and general knowledge.
-
-Your scope:
-- Coding, programming, software development (always answer these)
-- Science, math, history, geography, general education (answer these)
-- Technology, tools, frameworks, languages (always answer these)
-- Casual conversation and greetings (respond friendly)
-
-NOT your scope:
-- Political conflicts, wars, military topics
-- Controversial political opinions
-- Sensitive geopolitical issues
-
-If the question is outside your scope, politely say:
-"I'm focused on coding and education topics. For political or sensitive topics, I'd recommend a news source or general search engine. Can I help you with something related to coding or learning?"
-
-Keep responses concise and friendly.
-
-User said: {user_input}
+                prompt = f"""You are Vital, an AI assistant focused on coding, education and knowledge.
+Answer naturally. For political/conflict topics politely redirect to coding or education.
+{hist_block}
+User: {user_input}
 """
             elif multi_file_mode:
-                system_note = """When creating multiple files (HTML/CSS/JS etc.):
-- Put each file in its own code block
-- Add a comment on the line BEFORE each code block with the filename
-- Example:
-  index.html
-  ```html
-  ...code...
-  ```
-  style.css
-  ```css
-  ...code...
-  ```
-- Always create complete, working, production-quality code"""
-                prompt = f"""You are Vital, an expert AI coding assistant in the terminal.
-{system_note}
+                prompt = f"""You are Vital, an expert AI coding assistant.
+When creating multiple files: put each in its own code block with filename on the line before it.
+Always create complete, working, production-quality code.
 
-Working directory: {WORKING_DIR}
+{mem_block}{hist_block}Working directory: {WORKING_DIR}
 Project context:
-{(proj_ctx or '')[:4000]}
+{(proj_ctx or '')[:3000]}
 
-Developer's request: {user_input}
+Developer request: {user_input}
 """
             else:
-                prompt = f"""You are Vital, an expert AI coding assistant in the terminal.
-Be concise, practical and developer-focused. Provide complete working code when needed.
-You answer coding, programming, education and general knowledge questions.
-For political conflicts, wars or sensitive geopolitical topics, politely say you're focused on coding and education.
+                prompt = f"""You are Vital, an expert AI coding assistant.
+Be concise and practical. For political/conflict topics politely redirect.
 
-Working directory: {WORKING_DIR}
+{mem_block}{hist_block}Working directory: {WORKING_DIR}
 Project context:
-{(proj_ctx or '')[:4000]}
+{(proj_ctx or '')[:3000]}
 
-Developer's request: {user_input}
+Developer request: {user_input}
 """
-            response = ai_engine.ask(prompt)
+            # ── Get current provider name for spinner ─────────────────────
+            try:
+                from vital.providers import load_config, get_default_provider, PROVIDER_INFO
+                cfg      = load_config()
+                prov_id  = get_default_provider()
+                prov_name = PROVIDER_INFO.get(prov_id, {}).get("name", prov_id) if prov_id else None
+            except Exception:
+                prov_name = None
+
+            # ── Start spinner → ask AI → stop spinner ─────────────────────
+            spinner.start(provider=prov_name)
+            try:
+                response = ai_engine.ask(prompt)
+            finally:
+                spinner.stop()
+
+            # Save AI response to session
+            current_session.add("assistant", response)
 
             # ── File handling ─────────────────────────────────────────────
 
@@ -793,13 +1090,13 @@ Developer's request: {user_input}
                 saveable.append(block)
 
             if len(saveable) > 1:
-                # Multi-file project — one combined accept/reject
-                folder = None
-                words = user_input.lower().split()
-                for i, w in enumerate(words):
-                    if w in ("named", "called", "name") and i + 1 < len(words):
-                        folder = words[i + 1].strip(".,!?")
-                        break
+                # ── Fix 4: Smart folder detection ────────────────────────
+                folder = detect_folder_name(user_input)
+                if folder:
+                    console.print(
+                        f"\n  [#888888]Detected project folder:[/] "
+                        f"[bold #00ffcc]{folder}/[/]"
+                    )
                 offer_multi_file(saveable, folder_name=folder)
 
             elif len(saveable) == 1:
@@ -823,5 +1120,16 @@ Developer's request: {user_input}
             break
 
         except Exception as e:
-            console.print(f"\n  [#ff6b6b]Error:[/] [#aaaaaa]{e}[/]\n")
+            # Fix 9: Friendly error messages
+            try:
+                from vital.main import friendly_error
+                msg = friendly_error(e)
+            except Exception:
+                msg = str(e)
+            if msg:
+                console.print(f"\n  [bold #ff6b6b]✗[/]  {msg}\n")
+                console.print(
+                    "  [#444444]If this keeps happening, try /providers to switch AI or "
+                    "run vital setup to reconfigure.[/]\n"
+                )
             continue

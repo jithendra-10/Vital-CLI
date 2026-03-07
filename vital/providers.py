@@ -179,7 +179,7 @@ def setup_providers():
             f"  [#ffdd57]Enter {name} API key "
             f"({'update or ' if current_key else ''}press Enter to skip)[/]"
         )
-        key = Prompt.ask(prompt_text, default="", password=True)
+        key = Prompt.ask(prompt_text, default="")
         key = key.strip()
 
         if key:
@@ -465,6 +465,9 @@ def council_ask(prompt: str, task_type: str = "general") -> str:
 
 # ── Provider callers ──────────────────────────────────────────────────────────
 
+# Single source of truth for token limit across ALL providers
+MAX_TOKENS = 8192
+
 def _call_provider(
     provider: str,
     key: str,
@@ -513,7 +516,9 @@ def _call_groq(key: str, model: str, prompt: str, stream: bool) -> str:
     if stream:
         return _stream_response_groq(client, model, messages)
     else:
-        r = client.chat.completions.create(model=model, messages=messages)
+        r = client.chat.completions.create(
+            model=model, messages=messages, max_tokens=MAX_TOKENS
+        )
         return r.choices[0].message.content
 
 
@@ -521,7 +526,7 @@ def _stream_response_groq(client, model, messages) -> str:
     full = ""
     s = client.chat.completions.create(
         model=model, messages=messages,
-        stream=True, max_tokens=4096
+        stream=True, max_tokens=MAX_TOKENS
     )
     print()
     for chunk in s:
@@ -548,7 +553,7 @@ def _call_openai(key: str, model: str, prompt: str, stream: bool) -> str:
         print()
         s = client.chat.completions.create(
             model=model, messages=messages,
-            stream=True, max_tokens=4096
+            stream=True, max_tokens=MAX_TOKENS
         )
         for chunk in s:
             token = chunk.choices[0].delta.content or ""
@@ -557,7 +562,9 @@ def _call_openai(key: str, model: str, prompt: str, stream: bool) -> str:
         print()
         return full
     else:
-        r = client.chat.completions.create(model=model, messages=messages)
+        r = client.chat.completions.create(
+            model=model, messages=messages, max_tokens=MAX_TOKENS
+        )
         return r.choices[0].message.content
 
 
@@ -576,7 +583,7 @@ def _call_anthropic(key: str, model: str, prompt: str, stream: bool) -> str:
         print()
         with client.messages.stream(
             model=model,
-            max_tokens=4096,
+            max_tokens=MAX_TOKENS,
             messages=[{"role": "user", "content": prompt}]
         ) as s:
             for text in s.text_stream:
@@ -587,7 +594,7 @@ def _call_anthropic(key: str, model: str, prompt: str, stream: bool) -> str:
     else:
         r = client.messages.create(
             model=model,
-            max_tokens=4096,
+            max_tokens=MAX_TOKENS,
             messages=[{"role": "user", "content": prompt}]
         )
         return r.content[0].text
@@ -603,7 +610,8 @@ def _call_gemini(key: str, model: str, prompt: str, stream: bool) -> str:
         )
         return ""
     genai.configure(api_key=key)
-    m = genai.GenerativeModel(model)
+    generation_config = {"max_output_tokens": MAX_TOKENS}
+    m = genai.GenerativeModel(model, generation_config=generation_config)
     if stream:
         full = ""
         print()

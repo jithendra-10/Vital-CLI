@@ -1,61 +1,81 @@
-import typer
+"""refactor.py — Vital Refactorer"""
+
 from rich.console import Console
-from rich.panel import Panel
-from vital import ai_engine, context, executor
+from vital import ai_engine, context
+from vital.executor import write_file, read_file
 from vital.safety import show_plan, show_diff
 
 console = Console()
 
 
-def run(
-    file: str = typer.Argument(..., help="File to refactor"),
-    goal: str = typer.Option(None, "--goal", "-g", help="Refactoring goal"),
-):
-    """Refactor and improve your code quality using AI."""
+def run(file: str = None, goal: str = None):
+    """Refactor and improve code quality using AI."""
 
-    console.print(Panel("[bold cyan]Vital Refactorer[/bold cyan]", border_style="cyan"))
+    console.print()
+    console.print("  [bold #00ffcc]◈ Vital Refactorer[/]")
+    console.print("  [#333355]" + "─" * 45 + "[/]\n")
 
-    original = context.get_file_context(file)
-    original_content = executor.read_file(file)
+    if not file:
+        console.print("  [#ff6b6b]Usage: vital refactor <filename>[/]\n")
+        return
+
+    original = read_file(file)
+    if not original:
+        console.print(f"  [#ff6b6b]Could not read {file}[/]\n")
+        return
+
+    file_context = context.get_file_context(file)
 
     if not goal:
-        goal = typer.prompt("\nWhat's your refactoring goal?",
-                            default="Improve readability, structure, and follow best practices")
+        try:
+            goal = console.input(
+                "  [#ffdd57]Refactoring goal[/] "
+                "[#888888](Enter for default):[/] "
+            ).strip()
+        except (KeyboardInterrupt, EOFError):
+            return
+        if not goal:
+            goal = "Improve readability, structure, and follow best practices"
 
-    prompt = f"""
-Refactor this code file with this goal: {goal}
+    prompt = f"""Refactor this code file with this goal: {goal}
 
 Improvements to make:
-- Better variable/function names
-- Remove code duplication
+- Better variable and function names
+- Remove code duplication (DRY principle)
 - Improve structure and readability
 - Add type hints if Python
-- Follow best practices for the language
-- Optimize where obvious
+- Follow language best practices
+- Optimize where obviously beneficial
+- Add brief docstrings to functions
 
-Return ONLY the complete refactored file. No explanation, just the improved code.
+Return ONLY the complete refactored file content.
+No explanation, no markdown fences — just the improved code.
 
-Original file:
-{original}
+Original file ({file}):
+{file_context}
 """
 
-    console.print(f"\n[bold yellow]Refactoring {file}...[/bold yellow]\n")
-    refactored = ai_engine.ask(prompt, stream=False)
+    console.print(f"  [#888888]Refactoring [#ffdd57]{file}[/]...[/]\n")
+
+    try:
+        refactored = ai_engine.ask(prompt, stream=False)
+    except Exception as e:
+        console.print(f"  [#ff6b6b]✗ Error: {e}[/]\n")
+        return
 
     # Show diff
-    if original_content:
-        show_diff(original_content, refactored, file)
+    show_diff(original, refactored, file)
 
-    plan = [
-        f"Backup original {file} to {file}.bak",
+    if show_plan([
+        f"Backup original → {file}.bak",
+        f"Goal: {goal}",
         f"Write refactored version to {file}",
-    ]
-
-    if show_plan(plan, "Refactor Plan"):
-        # Backup original
-        executor.write_file(f"{file}.bak", original_content or "", auto_approve=True)
-        # Write refactored
-        executor.write_file(file, refactored)
-        console.print(f"\n[green]✓ Refactored! Original backed up to {file}.bak[/green]")
+    ], title="Refactor Plan"):
+        write_file(f"{file}.bak", original)
+        write_file(file, refactored)
+        console.print(
+            f"\n  [bold #00ffcc]✓ Refactored![/] "
+            f"[#888888]Original backed up to {file}.bak[/]\n"
+        )
     else:
-        console.print("[yellow]Refactoring cancelled.[/yellow]")
+        console.print("  [#888888]Refactoring cancelled.[/]\n")
