@@ -1,24 +1,68 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "vital"
+name = "vital-cli"
 version = "0.1.0"
-description = "AI-powered terminal coding assistant using Groq"
+description = "AI-powered terminal coding assistant — build, debug, refactor and ship code faster"
 readme = "README.md"
+license = { file = "LICENSE" }
 requires-python = ">=3.10"
+
+authors = [
+  { name = "Jithendra", email = "jithendragudidha@gmail.com" }
+]
+
+keywords = [
+  "ai", "cli", "coding", "assistant", "terminal",
+  "groq", "openai", "claude", "gemini", "llm",
+  "developer-tools", "code-generation", "agent"
+]
+
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+  "Topic :: Utilities",
+]
+
 dependencies = [
-    "typer>=0.12.0",
-    "rich>=13.0.0",
-    "groq>=0.9.0",
-    "python-dotenv>=1.0.0",
-    "keyring>=24.0.0",
+  "typer>=0.9.0",
+  "rich>=13.0.0",
+  "groq>=0.9.0",
+  "prompt-toolkit>=3.0.0",
+  "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+openai = ["openai>=1.0.0"]
+anthropic = ["anthropic>=0.25.0"]
+gemini = ["google-generativeai>=0.5.0"]
+all = [
+  "openai>=1.0.0",
+  "anthropic>=0.25.0",
+  "google-generativeai>=0.5.0",
 ]
 
 [project.scripts]
 vital = "vital.main:app"
 
+[project.urls]
+Homepage = "https://github.com/jithendra-10/Vital-CLI"
+Repository = "https://github.com/jithendra-10/Vital-CLI"
+"Bug Tracker" = "https://github.com/jithendra-10/Vital-CLI/issues"
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["vital*"]
+
+[tool.setuptools.package-data]
+vital = ["py.typed"]
