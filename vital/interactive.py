@@ -589,6 +589,26 @@ def _write_file_path(filepath: Path, code: str):
 # ── Banner ────────────────────────────────────────────────────────────────────
 
 def print_banner():
+    # Get metadata safely at the very start
+    try:
+        import datetime as _dt
+        now = _dt.datetime.now().strftime("%H:%M · %d %b %Y")
+    except Exception:
+        now = "unknown"
+
+    try:
+        from vital.providers import load_config, get_default_provider, PROVIDER_INFO
+        cfg = load_config()
+        def_prov = get_default_provider()
+        model_name = "unknown"
+        if def_prov in cfg.get("providers", {}):
+            model_name = cfg["providers"][def_prov].get("model", "unknown")
+    except Exception:
+        model_name = "unknown"
+
+    project = get_project_name()
+    branch  = get_git_branch()
+
     console.print()
     console.print(
         "  ╔══════════════════════════════════════════════════════════╗",
@@ -609,7 +629,7 @@ def print_banner():
         style="#ff6b6b"
     )
     console.print(
-        "  ║          Powered by Groq · Built for Developers          ║",
+        "  ║          Multi-Provider AI · Built for Developers        ║",
         style="#888888"
     )
     console.print(
@@ -618,21 +638,11 @@ def print_banner():
     )
     console.print()
 
-    now     = datetime.now().strftime("%H:%M · %d %b %Y")
-    project = get_project_name()
-    branch  = get_git_branch()
-    total   = get_total_file_count()
-    lang    = context.detect_language(str(WORKING_DIR))
 
     console.print(
-        f"  [#888888]Session[/]  [#00ffcc]{now}[/]   "
-        f"[#888888]Project[/]  [#ffdd57]{project}{branch}[/]   "
-        f"[#888888]Files[/]  [#ff6b6b]{total} total[/]   "
-        f"[#888888]Lang[/]  [#00ffcc]{lang}[/]   "
-        f"[#888888]Model[/]  [#00ffcc]llama-3.3-70b[/]"
-    )
-    console.print(
-        f"  [#888888]Directory[/]  [#444466]{WORKING_DIR}[/]"
+        f"  [#888888]Project[/]  [#ffdd57]{project}{branch}[/]   "
+        f"[#888888]Model[/]  [#00ffcc]{model_name}[/]   "
+        f"[#888888]Session[/]  [#00ffcc]{now}[/]"
     )
 
     # Show memory status
@@ -719,10 +729,18 @@ def handle_slash_command(user_input: str):
             agent.run(request)
 
     elif cmd == "/model":
-        console.print(
-            f"\n  [#888888]Model:[/] [bold #00ffcc]llama-3.3-70b-versatile[/] "
-            f"[#888888]via Groq[/]\n"
-        )
+        from vital.providers import load_config, get_default_provider, PROVIDER_INFO
+        cfg = load_config()
+        def_prov = get_default_provider()
+        if def_prov in cfg.get("providers", {}):
+            model = cfg["providers"][def_prov].get("model", "unknown")
+            prov_name = PROVIDER_INFO.get(def_prov, {}).get("name", def_prov)
+            console.print(
+                f"\n  [#888888]Current Model:[/] [bold #00ffcc]{model}[/] "
+                f"[#888888]via {prov_name}[/]\n"
+            )
+        else:
+            console.print("\n  [#ff6b6b]No default model configured.[/] Run [bold]vital setup[/bold].\n")
 
     elif cmd == "/providers":
         from vital.providers import _show_provider_status, edit_providers

@@ -9,7 +9,7 @@
 
 <p align="center">
   <b>Build, debug, refactor and ship code faster — all from your terminal.</b><br>
-  Supports Groq, OpenAI, Claude, and Gemini. Use one or all together.
+  Powered by your choice of AI: Groq, OpenAI, Claude, or Gemini.
 </p>
 
 ---
