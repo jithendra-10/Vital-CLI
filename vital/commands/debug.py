@@ -3,8 +3,7 @@
 import typer
 from rich.console import Console
 from vital import ai_engine, context
-from vital.executor import capture_error, write_file, read_file
-from vital.safety import show_plan
+from vital.executor import capture_error, read_file
 
 console = Console()
 
@@ -85,19 +84,44 @@ Original file:
 {file_context}
 """
             console.print("\n  [#888888]Generating fix...[/]\n")
+            import re as _re
             fixed_code = ai_engine.ask(fix_prompt, stream=False)
+            fixed_code = _re.sub(r'^```\w*\n?', '', fixed_code.strip())
+            fixed_code = _re.sub(r'\n?```$', '', fixed_code.strip())
 
-            if show_plan([
-                f"Backup {file} → {file}.bak",
-                f"Write fixed version to {file}",
-            ], title="Apply Fix"):
-                original = read_file(file)
-                if original:
-                    write_file(f"{file}.bak", original)
-                write_file(file, fixed_code)
-                console.print(
-                    "\n  [bold #00ffcc]✓ Fix applied![/] "
-                    "[#888888]Run your code to verify.[/]\n"
-                )
+            original = read_file(file)
+            if not original:
+                console.print(f"  [#ff6b6b]Could not read {file}[/]\n")
+                return
+
+            from vital.verify import verify_code, show_verify_error
+            result = verify_code(file, fixed_code)
+            if not result.passed:
+                show_verify_error(result)
+                return
+
+            from vital.patch import analyze_blast_radius, show_patch_preview, apply_patch
+            from vital.rollback import save_checkpoint
+            blast = analyze_blast_radius(file, original, fixed_code)
+            show_patch_preview(original, fixed_code, file, blast)
+
+            console.print(
+                "  [bold #00ffcc][A][/] Apply patch  "
+                "[bold #ff6b6b][R][/] Reject"
+            )
+            console.print()
+            try:
+                choice = console.input("  Your choice (A/R): ").strip().upper()
+            except (KeyboardInterrupt, EOFError):
+                return
+
+            if choice == "A":
+                save_checkpoint(file, original, description=f"debug fix: {error_output[:50]}")
+                if apply_patch(file, fixed_code):
+                    console.print(
+                        f"\n  [bold #00ffcc]✓ Fix applied![/] "
+                        f"[#888888]({blast.lines_changed} lines changed · "
+                        f"undo with: vital undo)[/]\n"
+                    )
             else:
                 console.print("  [#888888]Fix not applied.[/]\n")

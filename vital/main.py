@@ -299,6 +299,24 @@ def version_cmd():
     )
 
 
+# ─── Undo ──────────────────────────────────────────────────────────────────────
+
+@app.command()
+def undo(
+    file: str = typer.Argument(None, help="Specific file to undo (default: last changed file)"),
+    history: bool = typer.Option(False, "--history", "-h", help="Show full undo history"),
+):
+    """Undo the last AI-driven file change."""
+    try:
+        from vital.rollback import restore_last, list_undo_history
+        if history:
+            list_undo_history()
+        else:
+            restore_last(file)
+    except Exception as e:
+        console.print(f"\n  [bold #ff6b6b]✗[/] {friendly_error(e)}\n")
+
+
 # ─── Entry ────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

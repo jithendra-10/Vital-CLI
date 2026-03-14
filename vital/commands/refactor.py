@@ -1,15 +1,18 @@
-"""refactor.py — Vital Refactorer"""
+"""refactor.py — Vital Refactorer (patch mode)"""
 
+import re
 from rich.console import Console
 from vital import ai_engine, context
-from vital.executor import write_file, read_file
-from vital.safety import show_plan, show_diff
+from vital.executor import read_file
+from vital.patch import analyze_blast_radius, show_patch_preview, apply_patch
+from vital.rollback import save_checkpoint, restore_last
+from vital.verify import verify_code, show_verify_error
 
 console = Console()
 
 
 def run(file: str = None, goal: str = None):
-    """Refactor and improve code quality using AI."""
+    """Refactor code — shows minimal diff with confidence before applying."""
 
     console.print()
     console.print("  [bold #00ffcc]◈ Vital Refactorer[/]")
@@ -63,19 +66,51 @@ Original file ({file}):
         console.print(f"  [#ff6b6b]✗ Error: {e}[/]\n")
         return
 
-    # Show diff
-    show_diff(original, refactored, file)
+    # Strip accidental code fences
+    refactored = re.sub(r'^```\w*\n?', '', refactored.strip())
+    refactored = re.sub(r'\n?```$', '', refactored.strip())
 
-    if show_plan([
-        f"Backup original → {file}.bak",
-        f"Goal: {goal}",
-        f"Write refactored version to {file}",
-    ], title="Refactor Plan"):
-        write_file(f"{file}.bak", original)
-        write_file(file, refactored)
-        console.print(
-            f"\n  [bold #00ffcc]✓ Refactored![/] "
-            f"[#888888]Original backed up to {file}.bak[/]\n"
-        )
-    else:
-        console.print("  [#888888]Refactoring cancelled.[/]\n")
+    if refactored.strip() == original.strip():
+        console.print("  [#888888]AI found nothing to change.[/]\n")
+        return
+
+    # ── Verify syntax before touching disk ───────────────────────────
+    result = verify_code(file, refactored)
+    if not result.passed:
+        show_verify_error(result)
+        return
+
+    # ── Patch preview with confidence + blast radius ──────────────────
+    blast = analyze_blast_radius(file, original, refactored)
+    show_patch_preview(original, refactored, file, blast)
+
+    console.print(
+        "  [bold #00ffcc][A][/] Apply patch  "
+        "[bold #ff6b6b][R][/] Reject  "
+        "[bold #ffdd57][U][/] Undo last change"
+    )
+    console.print()
+
+    try:
+        choice = console.input("  Your choice (A/R/U): ").strip().upper()
+    except (KeyboardInterrupt, EOFError):
+        return
+
+    if choice == "U":
+        restore_last(file)
+        return
+
+    if choice == "R":
+        console.print("  [#ff6b6b]✗ Refactoring rejected.[/]\n")
+        return
+
+    if choice == "A":
+        save_checkpoint(file, original, description=f"refactor: {goal[:60]}")
+        if apply_patch(file, refactored):
+            console.print(
+                f"\n  [bold #00ffcc]✓ Refactoring applied![/] "
+                f"[#888888]({blast.lines_changed} lines changed · "
+                f"undo with: vital undo)[/]\n"
+            )
+        else:
+            console.print("  [#ff6b6b]✗ Failed to write patch.[/]\n")

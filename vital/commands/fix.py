@@ -1,16 +1,18 @@
-"""fix.py — Vital Fixer"""
+"""fix.py — Vital Fixer (patch mode)"""
 
-import typer
+import re
 from rich.console import Console
 from vital import ai_engine, context
-from vital.executor import write_file, read_file
-from vital.safety import show_plan, show_diff
+from vital.executor import read_file
+from vital.patch import analyze_blast_radius, show_patch_preview, apply_patch
+from vital.rollback import save_checkpoint, restore_last
+from vital.verify import verify_code, show_verify_error
 
 console = Console()
 
 
 def run(file: str = None, issue: str = None):
-    """Fix issues in a file using AI."""
+    """Fix issues in a file — shows minimal diff with confidence before applying."""
 
     console.print()
     console.print("  [bold #00ffcc]◈ Vital Fixer[/]")
@@ -57,19 +59,51 @@ File ({file}):
         console.print(f"  [#ff6b6b]✗ Error: {e}[/]\n")
         return
 
-    # Show diff so user knows what changed
-    show_diff(original, fixed_code, file)
+    # Strip accidental code fences
+    fixed_code = re.sub(r'^```\w*\n?', '', fixed_code.strip())
+    fixed_code = re.sub(r'\n?```$', '', fixed_code.strip())
 
-    if show_plan([
-        f"Backup {file} → {file}.bak",
-        f"Fix: {issue}",
-        f"Write fixed version to {file}",
-    ], title="Apply Fix"):
-        write_file(f"{file}.bak", original)
-        write_file(file, fixed_code)
-        console.print(
-            "\n  [bold #00ffcc]✓ Fix applied![/] "
-            f"[#888888]Original backed up to {file}.bak[/]\n"
-        )
-    else:
-        console.print("  [#888888]Fix cancelled.[/]\n")
+    if fixed_code.strip() == original.strip():
+        console.print("  [#888888]AI found nothing to change.[/]\n")
+        return
+
+    # ── Verify syntax before touching disk ───────────────────────────
+    result = verify_code(file, fixed_code)
+    if not result.passed:
+        show_verify_error(result)
+        return
+
+    # ── Patch preview with confidence + blast radius ──────────────────
+    blast = analyze_blast_radius(file, original, fixed_code)
+    show_patch_preview(original, fixed_code, file, blast)
+
+    console.print(
+        "  [bold #00ffcc][A][/] Apply patch  "
+        "[bold #ff6b6b][R][/] Reject  "
+        "[bold #ffdd57][U][/] Undo last change"
+    )
+    console.print()
+
+    try:
+        choice = console.input("  Your choice (A/R/U): ").strip().upper()
+    except (KeyboardInterrupt, EOFError):
+        return
+
+    if choice == "U":
+        restore_last(file)
+        return
+
+    if choice == "R":
+        console.print("  [#ff6b6b]✗ Patch rejected.[/]\n")
+        return
+
+    if choice == "A":
+        save_checkpoint(file, original, description=f"fix: {issue[:60]}")
+        if apply_patch(file, fixed_code):
+            console.print(
+                f"\n  [bold #00ffcc]✓ Patch applied![/] "
+                f"[#888888]({blast.lines_changed} lines changed · "
+                f"undo with: vital undo)[/]\n"
+            )
+        else:
+            console.print("  [#ff6b6b]✗ Failed to write patch.[/]\n")

@@ -120,6 +120,7 @@ COMMANDS = {
     "/memory":   "Manage memory: show, add, edit, clear, refresh",
     "/history":  "Show current session history",
     "/resume":   "Resume a previous session",
+    "/undo":     "Undo the last AI-driven file change",
     "/allowoff": "Turn off Always Allow mode",
     "/help":     "Show all commands",
     "/exit":     "Exit Vital",
@@ -746,6 +747,13 @@ def handle_slash_command(user_input: str):
         from vital.providers import _show_provider_status, edit_providers
         _show_provider_status()
         edit_providers()
+
+    elif cmd == "/undo":
+        from vital.rollback import restore_last, list_undo_history
+        if args and args[0] == "history":
+            list_undo_history()
+        else:
+            restore_last(args[0] if args else None)
 
     elif cmd == "/allowoff":
         global ALWAYS_ALLOW
